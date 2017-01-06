@@ -1,0 +1,301 @@
+---
+title: "Romantic Relationships and Service-scpaes: Insights from the Yelp dataset"
+output: html_document
+
+---
+
+```{r setup, include=F}
+knitr::opts_chunk$set(echo = TRUE)
+rests = read.csv("C:/my files/Romantic/Restaurants_50.csv", header = T,sep = ",")
+library(qgraph)
+library(corrplot)
+library(glmnet)
+library(leaps)
+library (pls)
+library(randomForest)
+library(tree)
+library(knitr)
+```
+
+## R Markdown
+
+
+In this script I will analyse different factors that I have extracted previously from Natural Language Processing. Here I will try different supervised learning models to find the best model and analyse the resaults.I will only focuse on wives and husbands here.
+
+```{r initial processing and cleaning}
+# restaurants with more than 50 reviews
+rests = read.csv("C:/my files/Romantic/Restaurants_50.csv", header = T,sep = ",") 
+
+features = rests[,c(16,18:26,28:30,32,33,35:42,46,49:52,54:58,63)] #Selecting Restaurants' features
+features$price = features$expensive+features$pricey
+features = scale(features[,c(-10,-13)])
+head(features,3) 
+```
+
+
+We will next separate the variables for our analyses. 
+
+```{r making new dataset for analysis}
+# Romantic variables
+wif.hus = rests$spouse
+family = rests$family
+BF.GF = rests$BFGF
+date = rests$date
+
+# other relevant romantic variables
+romantic = rests$romantic
+intimate = rests$intimate
+child = rests$children
+anniv = rests$anniversary
+
+
+#Making a dataframe for all the variables that we want
+all = data.frame(wif.hus,family,BF.GF,date,romantic,intimate,child,anniv,features)
+names(all)
+```
+To check how these variables correlate we make a correlation matrix and plot. 
+
+```{r correlation,fig.width=12, fig.height=12}
+corr = cor(all, use="complete.obs", method="pearson") 
+corrplot::corrplot(corr, method="circle",order ="hclust",tl.cex=0.85, tl.col = "black")
+title("Pearson corrletaion between different variables ", cex.main= 1.5)
+```
+
+A few correlations can be seen that are interesting. we can visualize the correlations in a network as well. 
+
+```{r correlation network, fig.width=20, fig.height=20}
+qgraph(corr, minimum = 0.15,color = "white", posCol = "darkgreen", negCol = "red",cut = 0.3, vsize = 3.5, borders = TRUE, layout = "spring", overlay = T, line = 2.5,esize = 12, labels = colnames(all))
+title("Pearson corrletaion between different variables ", cex.main= 2.5)
+```
+
+In the next steps we will look into different methods to find the factors that directly affect each romantic variables (i.e. Wif.Hus, BF.GF, date, family, romantic etc.). We intend to find the best model with the least MSE using different learning methods. 
+
+```{r test and training sets}
+set.seed(1)
+train = sample(nrow(all),1500, replace = F)
+test = -train
+all.x = all[,c(-1:-8)]
+all.y = all[,c(1:8)]
+all.x.train = all.x[train,]
+all.y.train = all.y[train,]
+all.x.test = all.x[test,]
+all.y.test = all.y[test,]
+all.train = all[train,]
+all.test = all[test,]
+```
+
+ First we begin with simple methods, the least square method: 
+
+```{r least square model}
+model.ls1.wifhus <- lm(wif.hus ~ . -BF.GF-family-date-romantic-intimate-child-anniv,all.train)
+pred.ls1.wifhus <- predict(model.ls1.wifhus, newdata = all.test) # validation predictions
+mse.ls1.wifhus <- mean((all.test$wif.hus - pred.ls1.wifhus)^2) # mean prediction error
+mse.ls1.wifhus
+```
+
+
+```{r Best Subset (variable selection) }
+
+model.best.wifhus = regsubsets(wif.hus ~ . -BF.GF-family-date-romantic-intimate-child-anniv, data =all.train, nvmax = 33)
+reg.summary = summary(model.best.wifhus)
+reg.summary$rss
+
+test.mat.wifhus = model.matrix(wif.hus ~ . -BF.GF-family-date-romantic-intimate-child-anniv, data = all.test)
+val.errors.wifhus = rep(NA,33)
+for (i in 1:33) {
+  coefi = coef(model.best.wifhus, id = i)
+  pred = test.mat.wifhus[, names(coefi)]%*%coefi
+  val.errors.wifhus[i] = mean((all.test$wif.hus- pred)^2)
+}
+
+print (val.errors.wifhus)
+plot(val.errors.wifhus, ylab = "MSE",xlab = "Number of variables in the model", pch = 19, type = "b", col = "blue")
+title("MSE for different number of variables for the best subset model", cex.main = 1)
+
+ # we select 8 variables because after that MSE doesn't seem to improve
+coef(model.best.wifhus,19)
+mse.best.wifhus <- val.errors.wifhus[19]
+mse.best.wifhus
+```
+The model seem to have improved a little through the varibles selection procedure. We can also try a k-fold cross validation (k = 10) on the previous model to see if we can see any improvement. 
+
+
+```{r k-fold best subset selection}
+
+k=10
+set.seed (1)
+folds=sample (1:k,nrow(all),replace =TRUE)
+cv.errors =matrix (NA ,k,33, dimnames =list(NULL , paste (1:33) ))
+
+#Define a function to enable us to predict with th ebest subset model
+predict.regsubsets = function(object, newdata, id, ...) {
+  form = as.formula(object$call[[2]])
+  mat = model.matrix(form, newdata)
+  coefi = coef(object, id = id)
+  mat[, names(coefi)] %*% coefi
+}
+
+
+for(j in 1:k){
+   best.fit =regsubsets(wif.hus~. -BF.GF-family-date-romantic-intimate-child-anniv, data = all[folds !=j,], nvmax=33)
+   for(i in 1:33) {
+     pred=predict (best.fit ,all[folds ==j,], id=i)
+     cv.errors [j,i]=mean( (all$wif.hus[folds ==j]-pred)^2)
+     }
+}
+
+mean.cv.errors =apply(cv.errors ,2, mean)
+mean.cv.errors
+par(mfrow =c(1,1))
+plot(mean.cv.errors ,ylab = "MSE",xlab = "Number of variables in the model", pch = 19, type = "b", col = "blue")
+title("MSE for different number of variables using k-fold cross validation", cex.main = 1)
+```
+
+The k-fold CV resulte in higher MSE for this regression. We will now try model shrinkage methods starting with Lasso regression. 
+
+```{r Lasso Regression}
+
+
+grid =10^seq (10,-3, length =10000)
+lasso.mod.wifhus =glmnet (as.matrix(all.x.train),as.matrix(all.y.train$wif.hus),alpha =1, lambda =grid, standardize=FALSE, thresh =1e-12)
+
+set.seed (1)
+cv.out =cv.glmnet (as.matrix(all.x.train),as.matrix(all.y.train$wif.hus),alpha =1)
+plot(cv.out)
+bestlam =cv.out$lambda.min #best lambda
+bestlam
+
+
+lasso.pred.wifhus=predict(lasso.mod.wifhus ,s=bestlam ,newx=as.matrix(all.x.test))
+mse.lasso.wifhus<- mean((lasso.pred.wifhus-all.y.test$wif.hus)^2)
+mse.lasso.wifhus
+
+
+```
+
+So far the resulting MSE from the LAsso regression is the smalles (i.e. 0.00729). We will now try the PCR model. 
+
+```{r PCR}
+
+set.seed (1)
+pcr_fit=pcr(wif.hus~.-BF.GF-family-date-romantic-intimate-child-anniv, 
+            data= all.train,scale=FALSE,validation ="CV")
+
+summary (pcr_fit)
+validationplot(pcr_fit,val.type="MSEP",main = "Validation plot for different number of variables \n (PCR Model)")
+pcr_valid=predict(pcr_fit ,all.test, ncomp =25)
+mse.pcr.wifhus<- mean((pcr_valid-all.test$wif.hus)^2)
+mse.pcr.wifhus
+```
+
+Now we run a PLS model to see if it will make any difference if we project the response variable as well. 
+
+```{r}
+set.seed (1)
+plsr_fit=plsr(wif.hus~.-BF.GF-family-date-romantic-intimate-child-anniv, 
+              data= all.train,scale=FALSE,validation ="CV")
+
+summary (plsr_fit)
+validationplot(plsr_fit,val.type="MSEP", main = "Validation plot for different number of variables \n (PLS Model)")
+plsr_valid=predict(plsr_fit ,all.test, ncomp =5)
+mse.pls.wifhus<- mean((plsr_valid-all.test$wif.hus)^2)
+mse.pls.wifhus
+
+```
+
+The model suggested by PLS is simpler but MSE is highe rfor this model. At last, we try regression trees and random forests. 
+
+```{r regression tree}
+
+tree_wh =tree(wif.hus~.-BF.GF-family-date-romantic-intimate-child-anniv,data= all.train)
+summary (tree_wh)
+cv_wh =cv.tree(tree_wh)
+yhat=predict(tree_wh ,newdata =all.test)
+y.test=all.test$wif.hus
+mse.tree.wifhus<-mean((yhat-y.test)^2)
+mse.tree.wifhus
+
+
+plot(tree_wh)
+text(tree_wh,pretty=0)
+
+```
+
+
+
+The MSE for the regression tree is high, compared to other methods. We will now try a random forest. 
+
+
+
+```{r random forest,fig.width=12, fig.height=12}
+set.seed (1)
+rand.wh =randomForest(wif.hus~.-BF.GF-family-date-romantic-intimate-child-anniv,data=all ,subset =train, importance =TRUE)
+rand.wh
+
+
+yhat.rand = predict(rand.wh ,newdata =all.test)
+mse.forest.wifhus<-mean((yhat.rand - all.test$wif.hus)^2)
+mse.forest.wifhus
+
+#importance(rand.wh)
+varImpPlot (rand.wh, main = "Importance of different factors for wife/husband restaurant selection \n (Random Forest Model)")
+```
+
+Now let's compare the resulting MSE for different models: 
+
+```{r Compare MSE, echo= FALSE}
+
+Model = c("Linear Least Square","Best Subset","Best Subset (CV K=10)", "Lasso","PCR","PLS","Regression Tree","Random Forest")
+
+MSE = c(round(mse.ls1.wifhus,7),round(mse.best.wifhus,7),round(mean.cv.errors[16],7),round(mse.lasso.wifhus,7),round(mse.pcr.wifhus,7),round(mse.pls.wifhus,7),round(mse.tree.wifhus,7),round(mse.forest.wifhus,7))
+
+mse_table = data.frame(Model,MSE)
+
+kable(mse_table, format = "markdown", caption = "Comparison between different models' performance")
+
+```
+
+Although the PCR model gives the smallest MSE, it's difficult to interpret the direct effect of factors in this model, as each component is a combination of many variables. The Lasso regression, although has a MSE slightly higher than the PCR model, but it provides a better model for analytical purposes. 
+
+```{r Final model (Lasso)}
+
+lasso.full.wifhus = glmnet(as.matrix(all.x),as.matrix(all.y$wif.hus),alpha =1)
+lasso_coef = predict (lasso.full.wifhus ,s=bestlam, type = "coefficient", newx = as.matrix(all.x))
+lasso_coef
+
+```
+
+
+This process was repreated for other romantic variables (i.e. Dating, Boyfriend/girlfriend, family, romantic, intimate, and anniversary). The following table shows the MSE for each variable and model used. The smaller the MSE the more preferable the model for that variable. 
+
+
+```{r compare all, echo = FALSE}
+
+response = c("dating","boyfriend/girlfriend","wife/husband","family","romantic","intimate","anniversary")
+
+colname= c("Romantic Variables","Linear Least Square","Best Subset","Best Subset (CV K=10)", "Lasso","PCR","PLS","Regression Tree","Random Forest")
+
+LLS = c("0.0030","0.0019","0.0074","0.0137","0.0008","0.0003","0.00058")
+BS = c("0.0030","0.0019","0.0073","0.0138","0.0008","0.0002","0.0005")
+BS_CV = c("0.0023","0.0018","0.0082","0.0120","0.0006","0.0002","0.0005")
+lass = c("0.0030","0.0019","0.0072","0.0136","0.0008","0.0002","0.0005")
+pcr = c("0.0030","0.0018","0.0072","0.0136","0.0008","0.0003","0.0005")
+pls = c("0.0030","0.0019","0.0074","0.0137","0.0008","0.0003","0.0005")
+RT = c("0.0038","0.0020","0.0089","0.0187","0.0010","0.0003","0.0008")
+RF = c("0.0029","0.0019","0.0076","0.0135","0.0007","0.0002","0.0004")
+
+MSE_T = data.frame(response,LLS,BS,BS_CV,lass,pcr,pls,RT,RF)
+
+kable(MSE_T, format = "html", caption ="A Comparison between different models' performance (MSE) \n for different romantic variables",col.names = colname)
+
+```
+
+
+
+
+
+
+
+
+
+
